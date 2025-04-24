@@ -3,6 +3,8 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:speech_to_text/speech_to_text.dart';
 import 'package:flutter_tts/flutter_tts.dart';
+// import 'package:flutter_webrtc/flutter_webrtc.dart'
+//     as rtc; // For speakerphone control
 // import 'package:http/http.dart' as http; // Removed unused import
 // import 'dart:io'; // Removed unused
 import '../models/message.dart'; // Correct path within the package
@@ -181,44 +183,43 @@ class SpeechService {
       debugPrint("Audio session activated/verified active for TTS playback.");
 
       if (_ttsProvider == TTSProvider.elevenLabs) {
-        playerStateSubscription =
-            _elevenLabsService.playerProcessingStateStream.listen(
-          (state) async {
-            if (state.processingState == ProcessingState.completed) {
-              await cancelPlaybackListeners();
-              debugPrint("TTS completed. Keeping AudioSession ACTIVE.");
-              if (_useVoiceOutput == true && !_isTriageComplete) {
-                debugPrint(
-                    "Adding 150ms guard delay before starting listening...");
-                await Future.delayed(const Duration(milliseconds: 150));
-                debugPrint("Guard delay finished. Starting listening.");
-                _startActualListening();
-              } else {
-                _updateState(SpeechServiceState.idle);
-              }
-            }
-          },
-          onError: (error) async {
-            debugPrint('ElevenLabs player stream error: $error');
-            await cancelPlaybackListeners();
-            try {
-              await _audioSession.setActive(false);
-              debugPrint(
-                  "Audio session deactivated due to player stream error.");
-            } catch (e) {
-              debugPrint("Error deactivating session on player error: $e");
-            }
-            _updateState(SpeechServiceState.idle);
-          },
-        );
-        await _elevenLabsService.synthesizeAndPlay(textToSpeak);
+        // Await playback completion directly; synthesizeAndPlay returns when audio finished
+        try {
+          await _elevenLabsService.synthesizeAndPlay(textToSpeak);
+        } catch (e) {
+          debugPrint('Error during ElevenLabs playback: $e');
+        }
+
+        // After playback completes, proceed with guard & listening/idle logic
+
+        try {
+          await _audioSession.setActive(false);
+          debugPrint("Audio session deactivated after TTS completion.");
+        } catch (e) {
+          debugPrint("Error deactivating audio session: $e");
+        }
+
+        if (_useVoiceOutput == true && !_isTriageComplete) {
+          debugPrint("Adding 500ms guard delay before starting listening...");
+          await Future.delayed(const Duration(milliseconds: 500));
+
+          debugPrint("Guard delay finished. Starting listening.");
+          _startActualListening();
+        } else {
+          _updateState(SpeechServiceState.idle);
+        }
       } else {
         // Flutter TTS
         await cancelPlaybackListeners();
         _flutterTts.setCompletionHandler(() async {
           await _audioSession.setActive(false);
           debugPrint("Audio session deactivated after FlutterTTS completion.");
+
           if (_useVoiceOutput == true && !_isTriageComplete) {
+            debugPrint(
+                "Adding 500ms guard delay before starting listening (FlutterTTS)...");
+            await Future.delayed(const Duration(milliseconds: 500));
+
             _startActualListening();
           } else {
             _updateState(SpeechServiceState.idle);

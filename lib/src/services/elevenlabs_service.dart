@@ -109,10 +109,19 @@ class ElevenLabsService {
 
         debugPrint('ElevenLabs: Saved audio to ${file.path}');
 
-        // Play the audio and wait for it to complete
+        // Load audio, start playback, then wait until it finishes
         await _audioPlayer.setFilePath(file.path);
-        await Future.delayed(const Duration(milliseconds: 100));
+
+        // Small delay to ensure player is ready
+        await Future.delayed(const Duration(milliseconds: 50));
+
         await _audioPlayer.play();
+
+        // Wait until processingState becomes completed
+        await _audioPlayer.playerStateStream.firstWhere(
+          (state) => state.processingState == ProcessingState.completed,
+        );
+
         _isPlaying = false;
         debugPrint('ElevenLabs: Finished playing audio');
       } else {

@@ -20,6 +20,7 @@ dependencies:
   dart_openai: ^5.1.0
   uuid: ^4.4.0
   audio_session: ^0.1.25
+  flutter_webrtc: ^0.12.11
   # Foundation is part of flutter sdk, no explicit dependency needed usually
 
 dev_dependencies:
