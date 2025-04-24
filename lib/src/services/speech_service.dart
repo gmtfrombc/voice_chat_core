@@ -97,13 +97,15 @@ class SpeechService {
       onError: (errorNotification) async {
         // onError is correct here
         debugPrint(
-            'Speech recognition init/global error: ${errorNotification.errorMsg}');
+          'Speech recognition init/global error: ${errorNotification.errorMsg}',
+        );
         if (_isListening) {
           _isListening = false;
           try {
             await _audioSession.setActive(false);
             debugPrint(
-                "Audio session deactivated due to STT init/global error.");
+              "Audio session deactivated due to STT init/global error.",
+            );
           } catch (e) {
             debugPrint("Error deactivating audio session in STT onError: $e");
           }
@@ -120,10 +122,12 @@ class SpeechService {
           try {
             await _audioSession.setActive(false);
             debugPrint(
-                "Audio session deactivated due to global 'notListening' status while _isListening was true.");
+              "Audio session deactivated due to global 'notListening' status while _isListening was true.",
+            );
           } catch (e) {
             debugPrint(
-                "Error deactivating audio session in global onStatus: $e");
+              "Error deactivating audio session in global onStatus: $e",
+            );
           }
           _updateState(SpeechServiceState.idle);
         } else if (status == 'done' && _isListening) {
@@ -133,7 +137,8 @@ class SpeechService {
           // but good to catch here too. Ensure state is updated appropriately.
           if (_currentState != SpeechServiceState.processing) {
             _updateState(
-                SpeechServiceState.idle); // Go idle if not already processing
+              SpeechServiceState.idle,
+            ); // Go idle if not already processing
           }
         }
       },
@@ -144,9 +149,11 @@ class SpeechService {
     await _flutterTts.setSpeechRate(0.5);
 
     debugPrint(
-        'Speech service initialized. Speech recognition available: $available');
+      'Speech service initialized. Speech recognition available: $available',
+    );
     debugPrint(
-        'Using TTS provider: ${_ttsProvider == TTSProvider.elevenLabs ? "ElevenLabs" : "Flutter TTS"}');
+      'Using TTS provider: ${_ttsProvider == TTSProvider.elevenLabs ? "ElevenLabs" : "Flutter TTS"}',
+    );
     if (!available) {
       debugPrint('Speech recognition not available');
     }
@@ -165,7 +172,8 @@ class SpeechService {
     final textToSpeak = text.replaceAll("[TRIAGE_COMPLETE]", "").trim();
     if (textToSpeak.isEmpty) {
       debugPrint(
-          'Text became empty after removing TRIAGE_COMPLETE token. Skipping speech.');
+        'Text became empty after removing TRIAGE_COMPLETE token. Skipping speech.',
+      );
       _updateState(SpeechServiceState.idle);
       return;
     }
@@ -179,7 +187,9 @@ class SpeechService {
     }
 
     try {
-      if (!await _audioSession.setActive(true)) {/* Okay if already active */}
+      if (!await _audioSession.setActive(true)) {
+        /* Okay if already active */
+      }
       debugPrint("Audio session activated/verified active for TTS playback.");
 
       if (_ttsProvider == TTSProvider.elevenLabs) {
@@ -217,7 +227,8 @@ class SpeechService {
 
           if (_useVoiceOutput == true && !_isTriageComplete) {
             debugPrint(
-                "Adding 500ms guard delay before starting listening (FlutterTTS)...");
+              "Adding 500ms guard delay before starting listening (FlutterTTS)...",
+            );
             await Future.delayed(const Duration(milliseconds: 500));
 
             _startActualListening();
@@ -233,11 +244,13 @@ class SpeechService {
         await _audioSession.setActive(false);
       } catch (sessionError) {
         debugPrint(
-            "Error deactivating session in _speak catch block: $sessionError");
+          "Error deactivating session in _speak catch block: $sessionError",
+        );
       }
       _updateState(SpeechServiceState.idle);
       _messagesController.add(
-          Message(content: 'Error during speech synthesis: $e', isUser: false));
+        Message(content: 'Error during speech synthesis: $e', isUser: false),
+      );
     }
   }
 
@@ -266,7 +279,8 @@ class SpeechService {
       _getAIResponse();
     } else {
       debugPrint(
-          'Triage already complete. Skipping AI response for text message.');
+        'Triage already complete. Skipping AI response for text message.',
+      );
     }
   }
 
@@ -318,6 +332,16 @@ class SpeechService {
     _elevenLabsService.dispose();
   }
 
+  /// Reset service to a clean state for a brand-new conversation session
+  void resetForNewSession() {
+    _isTriageComplete = false;
+    _useVoiceOutput = null;
+    _messages.clear();
+    _isListening = false;
+    _updateState(SpeechServiceState.idle);
+    debugPrint('SpeechService reset for new session');
+  }
+
   // Private method to start the actual speech recognition
   Future<void> _startActualListening() async {
     if (_isListening) return; // Prevent starting if already listening
@@ -329,7 +353,8 @@ class SpeechService {
     } catch (e) {
       debugPrint("Error activating audio session for listening: $e");
       _updateState(
-          SpeechServiceState.idle); // Go idle if session activation fails
+        SpeechServiceState.idle,
+      ); // Go idle if session activation fails
       return; // Don't proceed
     }
 
@@ -386,8 +411,11 @@ class SpeechService {
             _messagesController.add(partialMessage!); // Final UI update
           } else {
             // Create final message directly if no partial existed
-            final finalMessage =
-                Message(content: text, isUser: true, isPartial: false);
+            final finalMessage = Message(
+              content: text,
+              isUser: true,
+              isPartial: false,
+            );
             _messages.add(finalMessage);
             _messagesController.add(finalMessage);
           }
@@ -414,7 +442,8 @@ class SpeechService {
       debugPrint("Audio session deactivated after stopping listening.");
     } catch (e) {
       debugPrint(
-          "Error deactivating audio session after stopping listening: $e");
+        "Error deactivating audio session after stopping listening: $e",
+      );
     }
     if (_currentState == SpeechServiceState.listening && !_isTriageComplete) {
       _updateState(SpeechServiceState.processing);
@@ -436,30 +465,42 @@ class SpeechService {
   Future<void> _getStreamingAIResponse() async {
     if (_openAiApiKey.isEmpty || _openAiApiKey == 'replace_with_your_key') {
       debugPrint(
-          "OpenAI API Key is missing or invalid in _getStreamingAIResponse.");
-      _messagesController
-          .add(Message(content: "OpenAI API Key missing.", isUser: false));
+        "OpenAI API Key is missing or invalid in _getStreamingAIResponse.",
+      );
+      _messagesController.add(
+        Message(content: "OpenAI API Key missing.", isUser: false),
+      );
       _updateState(SpeechServiceState.idle);
       return;
     }
 
     final List<OpenAIChatCompletionChoiceMessageModel> formattedMessages = [];
-    formattedMessages.add(OpenAIChatCompletionChoiceMessageModel(
+    formattedMessages.add(
+      OpenAIChatCompletionChoiceMessageModel(
         role: OpenAIChatMessageRole.system,
         content: [
-          OpenAIChatCompletionChoiceMessageContentItemModel.text(_systemPrompt)
-        ]));
-    formattedMessages.addAll(_messages
-        .where((msg) => !msg.isPartial && msg.content.isNotEmpty)
-        .map((msg) => OpenAIChatCompletionChoiceMessageModel(
-                role: msg.isUser
-                    ? OpenAIChatMessageRole.user
-                    : OpenAIChatMessageRole.assistant,
-                content: [
-                  OpenAIChatCompletionChoiceMessageContentItemModel.text(
-                      msg.content)
-                ]))
-        .toList());
+          OpenAIChatCompletionChoiceMessageContentItemModel.text(_systemPrompt),
+        ],
+      ),
+    );
+    formattedMessages.addAll(
+      _messages
+          .where((msg) => !msg.isPartial && msg.content.isNotEmpty)
+          .map(
+            (msg) => OpenAIChatCompletionChoiceMessageModel(
+              role:
+                  msg.isUser
+                      ? OpenAIChatMessageRole.user
+                      : OpenAIChatMessageRole.assistant,
+              content: [
+                OpenAIChatCompletionChoiceMessageContentItemModel.text(
+                  msg.content,
+                ),
+              ],
+            ),
+          )
+          .toList(),
+    );
 
     final pendingMessage = Message(content: "", isUser: false, isPartial: true);
     if (!_messages.any((m) => m.isPartial && !m.isUser)) {
@@ -473,15 +514,19 @@ class SpeechService {
 
     try {
       final stream = OpenAI.instance.chat.createStream(
-          model: "gpt-3.5-turbo", messages: formattedMessages, maxTokens: 150);
+        model: "gpt-3.5-turbo",
+        messages: formattedMessages,
+        maxTokens: 150,
+      );
       streamSubscription = stream.listen(
         (event) {
           final deltaContent = event.choices.first.delta.content?.first?.text;
           if (deltaContent != null) {
             fullContent += deltaContent;
             final existingPending = _messages.firstWhere(
-                (m) => m.isPartial && !m.isUser,
-                orElse: () => pendingMessage);
+              (m) => m.isPartial && !m.isUser,
+              orElse: () => pendingMessage,
+            );
             existingPending.content = fullContent;
             _messagesController.add(existingPending);
           }
@@ -489,21 +534,27 @@ class SpeechService {
         onError: (error) {
           debugPrint("Error in OpenAI stream: $error");
           final existingPending = _messages.firstWhere(
-              (m) => m.isPartial && !m.isUser,
-              orElse: () => pendingMessage);
+            (m) => m.isPartial && !m.isUser,
+            orElse: () => pendingMessage,
+          );
           if (_messages.contains(existingPending)) {
             _messages.remove(existingPending);
           }
-          _messagesController.add(Message(
-              content: "Error receiving AI response: $error", isUser: false));
+          _messagesController.add(
+            Message(
+              content: "Error receiving AI response: $error",
+              isUser: false,
+            ),
+          );
           _updateState(SpeechServiceState.idle);
           streamSubscription?.cancel();
         },
         onDone: () async {
           debugPrint('OpenAI stream completed via dart_openai');
           final existingPending = _messages.firstWhere(
-              (m) => m.isPartial && !m.isUser,
-              orElse: () => pendingMessage);
+            (m) => m.isPartial && !m.isUser,
+            orElse: () => pendingMessage,
+          );
           if (_messages.contains(existingPending)) {
             existingPending.isPartial = false;
             _messagesController.add(existingPending);
@@ -518,7 +569,8 @@ class SpeechService {
             if (fullContent.contains("[TRIAGE_COMPLETE]")) {
               _isTriageComplete = true;
               debugPrint(
-                  'TRIAGE_COMPLETE token detected in AI response (text mode).');
+                'TRIAGE_COMPLETE token detected in AI response (text mode).',
+              );
             }
             _updateState(SpeechServiceState.idle);
           }
@@ -529,13 +581,15 @@ class SpeechService {
     } catch (e) {
       debugPrint('Error creating OpenAI stream request: $e');
       final existingPending = _messages.firstWhere(
-          (m) => m.isPartial && !m.isUser,
-          orElse: () => pendingMessage);
+        (m) => m.isPartial && !m.isUser,
+        orElse: () => pendingMessage,
+      );
       if (_messages.contains(existingPending)) {
         _messages.remove(existingPending);
       }
       _messagesController.add(
-          Message(content: 'Error communicating with AI: $e', isUser: false));
+        Message(content: 'Error communicating with AI: $e', isUser: false),
+      );
       _updateState(SpeechServiceState.idle);
       await streamSubscription?.cancel();
     }
