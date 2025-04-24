@@ -1,12 +1,16 @@
 import 'dart:async';
-import 'dart:convert';
+// import 'dart:convert'; // Removed unused
 import 'package:flutter/foundation.dart';
 import 'package:speech_to_text/speech_to_text.dart';
 import 'package:flutter_tts/flutter_tts.dart';
-import 'package:http/http.dart' as http;
-import 'dart:io';
+// import 'package:http/http.dart' as http; // Removed unused import
+// import 'dart:io'; // Removed unused
 import '../models/message.dart'; // Correct path within the package
 import 'elevenlabs_service.dart'; // Correct path within the package
+// ignore: unused_import - Linter incorrectly flags this, but AudioSession type IS used in constructor.
+import 'package:audio_session/audio_session.dart';
+import 'package:dart_openai/dart_openai.dart'; // Import dart_openai
+import 'package:just_audio/just_audio.dart';
 
 enum SpeechServiceState { idle, listening, speaking, processing }
 
@@ -16,7 +20,6 @@ enum TTSProvider { flutterTTS, elevenLabs }
 class SpeechService {
   // Configuration - to be injected later
   late final String _openAiApiKey;
-  late final String _openAiChatUrl;
 
   // Speech recognition
   final SpeechToText _speechToText = SpeechToText();
@@ -27,12 +30,14 @@ class SpeechService {
   // ElevenLabs service for natural voice
   late final ElevenLabsService _elevenLabsService; // Will be initialized later
 
+  // Audio Session instance (injected)
+  late final AudioSession _audioSession; // Instance is used in methods below
+
   // TTS provider selection
   TTSProvider _ttsProvider = TTSProvider.elevenLabs;
 
   // State management
   bool _isListening = false;
-  bool _isSpeaking = false;
   SpeechServiceState _currentState = SpeechServiceState.idle;
 
   // Conversation history
@@ -51,6 +56,15 @@ class SpeechService {
   // Conversation history
   List<Message> get messages => List.unmodifiable(_messages);
 
+  // Internal variable to hold the system prompt
+  String _systemPrompt = 'You are a helpful AI assistant.'; // Default prompt
+
+  // Internal flag for triage completion
+  bool _isTriageComplete = false;
+
+  // Flag to determine output modality (true=Voice, false=Text, null=Undecided)
+  bool? _useVoiceOutput;
+
   // Get current TTS provider
   TTSProvider get ttsProvider => _ttsProvider;
 
@@ -59,336 +73,209 @@ class SpeechService {
     _ttsProvider = provider;
   }
 
-  // Constructor requires configuration
+  // Constructor requires configuration and AudioSession
   SpeechService({
     required String openAiApiKey,
-    required String openAiChatUrl,
+    // openAiChatUrl parameter removed as it wasn't used
     required ElevenLabsService elevenLabsService,
+    required AudioSession audioSession,
   }) {
     _openAiApiKey = openAiApiKey;
-    _openAiChatUrl = openAiChatUrl;
     _elevenLabsService = elevenLabsService;
+    _audioSession = audioSession;
+    // Initialize OpenAI API Key here
+    OpenAI.apiKey = _openAiApiKey;
+    // Consider adding organization ID if needed: OpenAI.organization = "ORG_ID";
   }
 
   // Initialize speech services
   Future<void> initialize() async {
-    // Initialize speech recognition
-    bool available = await _speechToText.initialize();
+    // Initialize speech recognition with error and status handlers
+    bool available = await _speechToText.initialize(
+      onError: (errorNotification) async {
+        // onError is correct here
+        debugPrint(
+            'Speech recognition init/global error: ${errorNotification.errorMsg}');
+        if (_isListening) {
+          _isListening = false;
+          try {
+            await _audioSession.setActive(false);
+            debugPrint(
+                "Audio session deactivated due to STT init/global error.");
+          } catch (e) {
+            debugPrint("Error deactivating audio session in STT onError: $e");
+          }
+          _updateState(SpeechServiceState.idle);
+        }
+      },
+      onStatus: (status) async {
+        // onStatus is correct here
+        debugPrint('Speech recognition global status: $status');
+        // Handle global status changes, e.g., permissions, availability
+        if (status == 'notListening' && _isListening) {
+          // This might indicate an unexpected stop or permission issue
+          _isListening = false;
+          try {
+            await _audioSession.setActive(false);
+            debugPrint(
+                "Audio session deactivated due to global 'notListening' status while _isListening was true.");
+          } catch (e) {
+            debugPrint(
+                "Error deactivating audio session in global onStatus: $e");
+          }
+          _updateState(SpeechServiceState.idle);
+        } else if (status == 'done' && _isListening) {
+          // If listener completes naturally and reports 'done' globally
+          _isListening = false;
+          // Should have already been handled by onResult's final result,
+          // but good to catch here too. Ensure state is updated appropriately.
+          if (_currentState != SpeechServiceState.processing) {
+            _updateState(
+                SpeechServiceState.idle); // Go idle if not already processing
+          }
+        }
+      },
+    );
 
-    // Configure text-to-speech (Flutter TTS)
     await _flutterTts.setLanguage("en-US");
     await _flutterTts.setPitch(1.0);
     await _flutterTts.setSpeechRate(0.5);
 
-    _flutterTts.setCompletionHandler(() {
-      _isSpeaking = false;
-      _updateState(SpeechServiceState.idle);
-    });
-
-    // Initialize ElevenLabs service (already injected)
-    // await _elevenLabsService.initialize(); // Initialization handled by consuming app or main service setup
-
-    // Log initialization status
     debugPrint(
-      'Speech service initialized. Speech recognition available: $available',
-    );
+        'Speech service initialized. Speech recognition available: $available');
     debugPrint(
-      'Using TTS provider: ${_ttsProvider == TTSProvider.elevenLabs ? "ElevenLabs" : "Flutter TTS"}',
-    );
-
+        'Using TTS provider: ${_ttsProvider == TTSProvider.elevenLabs ? "ElevenLabs" : "Flutter TTS"}');
     if (!available) {
       debugPrint('Speech recognition not available');
     }
   }
 
-  // Start listening to user speech
-  Future<void> startListening() async {
-    if (_isListening) return;
-
-    _updateState(SpeechServiceState.listening);
-    _isListening = true;
-
-    // Create a placeholder message for partial results
-    Message? partialMessage;
-
-    await _speechToText.listen(
-      onResult: (result) {
-        final text = result.recognizedWords;
-
-        if (text.isEmpty) return;
-
-        // Always send the current recognition text to the speech controller
-        _speechController.add(text);
-
-        if (!result.finalResult) {
-          // Handle partial result for real-time feedback
-          debugPrint('Partial speech result: $text');
-
-          // Update or create partial message
-          if (partialMessage == null) {
-            partialMessage = Message(
-              content: text,
-              isUser: true,
-              isPartial: true,
-            );
-            _messages.add(partialMessage!);
-            _messagesController.add(partialMessage!);
-          } else {
-            // Update existing partial message
-            partialMessage!.content = text;
-            _messagesController.add(partialMessage!);
-          }
-        } else {
-          // Final result - remove partial message if it exists
-          if (partialMessage != null) {
-            _messages.remove(partialMessage);
-          }
-
-          // Add final user message to history
-          final message = Message(content: text, isUser: true);
-          _messages.add(message);
-          _messagesController.add(message);
-
-          // Stop listening and process response
-          stopListening();
-          _getAIResponse();
-        }
-      },
-      listenFor: const Duration(seconds: 15),
-      pauseFor: const Duration(seconds: 3),
-      localeId: 'en_US',
-      listenMode: ListenMode.dictation, // Better for continuous speech
-    );
+  Future<void> initiateVoiceFlow() async {
+    _useVoiceOutput ??= true;
+    await _speak("Hi there, what can I help you with today?");
   }
 
-  // Stop listening to user speech
-  Future<void> stopListening() async {
-    if (!_isListening) return;
-
-    await _speechToText.stop();
-    _isListening = false;
-
-    if (_currentState == SpeechServiceState.listening) {
-      _updateState(SpeechServiceState.processing);
-    }
-  }
-
-  // Get AI response based on conversation history
-  Future<void> _getAIResponse() async {
-    _updateState(SpeechServiceState.processing);
-
-    // Try using streaming response
-    await _getStreamingAIResponse();
-  }
-
-  // Get streaming AI response using SSE
-  Future<void> _getStreamingAIResponse() async {
-    try {
-      // Prepare messages for API call
-      final List<Map<String, dynamic>> formattedMessages =
-          _messages.map((msg) => msg.toJson()).toList();
-
-      // Remove any partial messages before sending
-      formattedMessages.removeWhere(
-        (msg) => msg['content'].isEmpty || msg['content'] == null,
-      );
-
-      // Create placeholder message for streaming responses
-      final pendingMessage = Message(
-        content: "",
-        isUser: false,
-        isPartial: true,
-      );
-      _messages.add(pendingMessage);
-      _messagesController.add(pendingMessage);
-
-      debugPrint('Starting streaming OpenAI request');
-
-      // Use HTTP client with streaming capability
-      final client = HttpClient();
-      final request = await client.postUrl(
-        Uri.parse(_openAiChatUrl),
-      ); // Use injected URL
-
-      // Add request headers
-      request.headers.set('Content-Type', 'application/json');
-      request.headers.set(
-        'Authorization',
-        'Bearer $_openAiApiKey',
-      ); // Use injected key
-
-      // Prepare request body with streaming flag
-      final requestBody = jsonEncode({
-        'model': 'gpt-3.5-turbo',
-        'messages': [
-          {
-            'role': 'system',
-            'content':
-                'You are a helpful AI assistant. Please keep your responses concise and to the point. Aim for 1-2 sentences when possible.',
-          },
-          ...formattedMessages,
-        ],
-        'stream': true,
-        'max_tokens': 150, // Limit response length
-      });
-
-      request.write(requestBody);
-      final response = await request.close();
-
-      if (response.statusCode == 200) {
-        debugPrint('Receiving OpenAI streaming response');
-
-        String fullContent = "";
-
-        // Process the streaming response
-        await for (var data in response.transform(utf8.decoder)) {
-          // Handle SSE format (each line starts with "data: ")
-          final lines = data.split('\n');
-
-          for (var line in lines) {
-            if (line.startsWith('data: ') && line != 'data: [DONE]') {
-              String jsonData = ''; // Initialize outside try-catch
-              try {
-                // Extract the actual JSON data part
-                jsonData = line.substring(6);
-
-                // Parse the JSON response
-                final Map<String, dynamic> chunk = jsonDecode(jsonData);
-
-                // Extract incremental text (delta)
-                final delta = chunk['choices'][0]['delta']['content'] ?? '';
-                fullContent += delta;
-
-                // Update our pending message with accumulated content
-                pendingMessage.content = fullContent;
-                _messagesController.add(pendingMessage);
-              } catch (e) {
-                // Log error for the specific chunk but continue processing
-                debugPrint('Error parsing stream chunk: $e');
-                debugPrint('Problematic JSON data: $jsonData');
-              }
-            } else if (line == 'data: [DONE]') {
-              // Stream finished
-              debugPrint('OpenAI stream completed');
-              // Finalize the message (mark as not partial)
-              pendingMessage.isPartial = false;
-              _messagesController.add(pendingMessage);
-              if (fullContent.isNotEmpty) {
-                _speak(fullContent);
-              }
-              client.close(); // Ensure the client is closed when done
-              return; // Exit the method after completion
-            }
-          }
-        }
-        // Should close client if loop finishes unexpectedly (e.g., connection drop)
-        client.close();
-      } else {
-        // Handle error
-        debugPrint('OpenAI API Error: ${response.statusCode}');
-        String responseBody = await response.transform(utf8.decoder).join();
-        debugPrint('Error body: $responseBody');
-
-        // Remove pending message on error
-        _messages.remove(pendingMessage);
-        _messagesController.add(
-          Message(
-            content: 'Error: ${response.statusCode} - $responseBody',
-            isUser: false,
-          ),
-        );
-        _updateState(SpeechServiceState.idle);
-        client.close(); // Ensure client is closed on error
-      }
-    } catch (e) {
-      debugPrint('Error getting AI response: $e');
-      _messagesController.add(
-        Message(content: 'Error communicating with AI: $e', isUser: false),
-      );
-      _updateState(SpeechServiceState.idle);
-    } finally {
-      // Ensure state returns to idle unless speaking starts
-      if (_currentState != SpeechServiceState.speaking) {
-        _updateState(SpeechServiceState.idle);
-      }
-    }
-  }
-
-  // Speak the given text using the selected TTS provider
   Future<void> _speak(String text) async {
     if (text.isEmpty) {
       _updateState(SpeechServiceState.idle);
       return;
     }
+    final textToSpeak = text.replaceAll("[TRIAGE_COMPLETE]", "").trim();
+    if (textToSpeak.isEmpty) {
+      debugPrint(
+          'Text became empty after removing TRIAGE_COMPLETE token. Skipping speech.');
+      _updateState(SpeechServiceState.idle);
+      return;
+    }
 
     _updateState(SpeechServiceState.speaking);
-    _isSpeaking = true;
+
+    StreamSubscription<PlayerState>? playerStateSubscription;
+    Future<void> cancelPlaybackListeners() async {
+      await playerStateSubscription?.cancel();
+      playerStateSubscription = null;
+    }
 
     try {
+      if (!await _audioSession.setActive(true)) {/* Okay if already active */}
+      debugPrint("Audio session activated/verified active for TTS playback.");
+
       if (_ttsProvider == TTSProvider.elevenLabs) {
-        // Use ElevenLabs service
-        await _elevenLabsService.synthesizeAndPlay(text);
-        // Rely on ElevenLabsService's internal state/completion to set _isSpeaking = false
+        playerStateSubscription =
+            _elevenLabsService.playerProcessingStateStream.listen(
+          (state) async {
+            if (state.processingState == ProcessingState.completed) {
+              await cancelPlaybackListeners();
+              debugPrint("TTS completed. Keeping AudioSession ACTIVE.");
+              if (_useVoiceOutput == true && !_isTriageComplete) {
+                debugPrint(
+                    "Adding 150ms guard delay before starting listening...");
+                await Future.delayed(const Duration(milliseconds: 150));
+                debugPrint("Guard delay finished. Starting listening.");
+                _startActualListening();
+              } else {
+                _updateState(SpeechServiceState.idle);
+              }
+            }
+          },
+          onError: (error) async {
+            debugPrint('ElevenLabs player stream error: $error');
+            await cancelPlaybackListeners();
+            try {
+              await _audioSession.setActive(false);
+              debugPrint(
+                  "Audio session deactivated due to player stream error.");
+            } catch (e) {
+              debugPrint("Error deactivating session on player error: $e");
+            }
+            _updateState(SpeechServiceState.idle);
+          },
+        );
+        await _elevenLabsService.synthesizeAndPlay(textToSpeak);
       } else {
-        // Use Flutter TTS
-        await _flutterTts.speak(text);
-        // Completion handler for FlutterTTS will set _isSpeaking = false
+        // Flutter TTS
+        await cancelPlaybackListeners();
+        _flutterTts.setCompletionHandler(() async {
+          await _audioSession.setActive(false);
+          debugPrint("Audio session deactivated after FlutterTTS completion.");
+          if (_useVoiceOutput == true && !_isTriageComplete) {
+            _startActualListening();
+          } else {
+            _updateState(SpeechServiceState.idle);
+          }
+        });
+        await _flutterTts.speak(textToSpeak);
       }
     } catch (e) {
-      debugPrint('Error during TTS: $e');
-      _isSpeaking = false;
+      debugPrint('Error during TTS (_speak try block): $e');
+      try {
+        await _audioSession.setActive(false);
+      } catch (sessionError) {
+        debugPrint(
+            "Error deactivating session in _speak catch block: $sessionError");
+      }
       _updateState(SpeechServiceState.idle);
-      // Optionally add an error message to the chat
       _messagesController.add(
-        Message(content: 'Error during speech synthesis: $e', isUser: false),
-      );
-    } finally {
-      // Ensure state transitions correctly if speaking finishes quickly or errors out
-      // The completion handlers/listeners should handle the final state change
-      // but this is a safeguard.
-      // We might need a better way to know when ElevenLabs is truly done.
-      // Let's wait for the completion handler logic for now.
+          Message(content: 'Error during speech synthesis: $e', isUser: false));
     }
   }
 
-  // Stop speech playback
   Future<void> stopSpeaking() async {
+    try {
+      await _audioSession.setActive(false);
+      debugPrint("Audio session deactivated due to stopSpeaking call.");
+    } catch (e) {
+      debugPrint("Error deactivating audio session in stopSpeaking: $e");
+    }
     if (_ttsProvider == TTSProvider.elevenLabs) {
       await _elevenLabsService.stop();
     } else {
       await _flutterTts.stop();
     }
-    _isSpeaking = false;
     _updateState(SpeechServiceState.idle);
   }
 
-  // Add a text message (e.g., from a text input field)
   void addTextMessage(String text) {
     if (text.trim().isEmpty) return;
-
-    // Add user message
+    _useVoiceOutput ??= false;
     final userMessage = Message(content: text, isUser: true);
     _messages.add(userMessage);
     _messagesController.add(userMessage);
-
-    // Get AI response
-    _getAIResponse();
+    if (!_isTriageComplete) {
+      _getAIResponse();
+    } else {
+      debugPrint(
+          'Triage already complete. Skipping AI response for text message.');
+    }
   }
 
-  // Update the current state and notify listeners
   void _updateState(SpeechServiceState newState) {
     _currentState = newState;
     _stateController.add(newState);
     debugPrint('SpeechService state changed to: $newState');
   }
 
-  // --- ElevenLabs Settings Proxy Methods ---
-
-  /// Gets the list of available voices from the configured ElevenLabs service.
-  /// Returns an empty list if the API key is missing or an error occurs.
   Future<List<Map<String, dynamic>>> getAvailableElevenLabsVoices() async {
-    // Ensure ElevenLabs is the selected provider, although fetching might be okay regardless
-    // if (_ttsProvider != TTSProvider.elevenLabs) return [];
     try {
       return await _elevenLabsService.getAvailableVoices();
     } catch (e) {
@@ -397,8 +284,6 @@ class SpeechService {
     }
   }
 
-  /// Gets the list of available models from the configured ElevenLabs service.
-  /// Returns an empty list if the API key is missing or an error occurs.
   Future<List<Map<String, dynamic>>> getAvailableElevenLabsModels() async {
     try {
       return await _elevenLabsService.getAvailableModels();
@@ -408,28 +293,250 @@ class SpeechService {
     }
   }
 
-  /// Sets the voice ID to be used by the underlying ElevenLabs service.
   void setElevenLabsVoiceId(String voiceId) {
     _elevenLabsService.setVoiceId(voiceId);
     debugPrint('ElevenLabs voice ID set to: $voiceId via SpeechService');
-    // Note: No notifyListeners() here, this service doesn't use ChangeNotifier
   }
 
-  /// Sets the model ID to be used by the underlying ElevenLabs service.
   void setElevenLabsModelId(String modelId) {
     _elevenLabsService.setModelId(modelId);
     debugPrint('ElevenLabs model ID set to: $modelId via SpeechService');
   }
 
-  // --- End of ElevenLabs Settings Proxy Methods ---
+  void setSystemPrompt(String prompt) {
+    _systemPrompt = prompt;
+    debugPrint('SpeechService system prompt updated.');
+  }
 
-  // Dispose resources
   void dispose() {
     _speechController.close();
     _stateController.close();
     _messagesController.close();
     _speechToText.cancel();
     _flutterTts.stop();
-    _elevenLabsService.dispose(); // Dispose injected service
+    _elevenLabsService.dispose();
+  }
+
+  // Private method to start the actual speech recognition
+  Future<void> _startActualListening() async {
+    if (_isListening) return; // Prevent starting if already listening
+
+    try {
+      // Activate audio session for recording *before* starting listener
+      await _audioSession.setActive(true);
+      debugPrint("Audio session activated for listening.");
+    } catch (e) {
+      debugPrint("Error activating audio session for listening: $e");
+      _updateState(
+          SpeechServiceState.idle); // Go idle if session activation fails
+      return; // Don't proceed
+    }
+
+    _updateState(SpeechServiceState.listening);
+    _isListening = true;
+
+    Message? partialMessage; // Placeholder message for partial results
+
+    // --- Define SpeechListenOptions right before use ---
+    final options = SpeechListenOptions(
+      listenMode: ListenMode.dictation, // Correct way to set mode
+      cancelOnError: true, // Recommended for robustness
+      partialResults: true, // Keep partial results
+      // Add other options if needed, e.g., autoPunctuation: true (iOS only)
+    );
+
+    // Note: listen itself doesn't return a future indicating completion.
+    // Completion is handled via onResult or onStatus callbacks.
+    _speechToText.listen(
+      listenOptions: options, // Correct parameter name is listenOptions
+      listenFor: const Duration(seconds: 15), // Duration outside options
+      pauseFor: const Duration(seconds: 3), // Duration outside options
+      localeId: 'en_US', // Locale outside options
+      onResult: (result) {
+        final text = result.recognizedWords;
+        if (text.isEmpty) return; // Ignore empty results
+
+        _speechController.add(text); // Send result to UI stream
+
+        if (!result.finalResult) {
+          // Handle partial result for real-time feedback
+          debugPrint('Partial speech result: $text');
+          if (partialMessage == null) {
+            // Create new partial message if none exists
+            partialMessage = Message(
+              content: text,
+              isUser: true,
+              isPartial: true,
+            );
+            _messages.add(partialMessage!); // Add to history
+            _messagesController.add(partialMessage!); // Update UI
+          } else {
+            // Update existing partial message
+            partialMessage!.content = text;
+            _messagesController.add(partialMessage!); // Update UI
+          }
+        } else {
+          // Handle final result
+          debugPrint('Final speech result: $text');
+          if (partialMessage != null) {
+            // Finalize existing partial message
+            partialMessage!.content = text;
+            partialMessage!.isPartial = false;
+            _messagesController.add(partialMessage!); // Final UI update
+          } else {
+            // Create final message directly if no partial existed
+            final finalMessage =
+                Message(content: text, isUser: true, isPartial: false);
+            _messages.add(finalMessage);
+            _messagesController.add(finalMessage);
+          }
+          // Stop listening logically and process the AI response
+          stopListening(); // This handles state and session deactivation
+          _getAIResponse();
+        }
+      },
+      // onStatus parameter removed from here - handled in initialize
+    );
+  }
+
+  Future<void> startListening() async {
+    _useVoiceOutput ??= true;
+    await _startActualListening();
+  }
+
+  Future<void> stopListening() async {
+    if (!_isListening) return;
+    await _speechToText.stop();
+    _isListening = false; // Update state immediately
+    try {
+      await _audioSession.setActive(false);
+      debugPrint("Audio session deactivated after stopping listening.");
+    } catch (e) {
+      debugPrint(
+          "Error deactivating audio session after stopping listening: $e");
+    }
+    if (_currentState == SpeechServiceState.listening && !_isTriageComplete) {
+      _updateState(SpeechServiceState.processing);
+    } else if (_currentState != SpeechServiceState.processing) {
+      _updateState(SpeechServiceState.idle);
+    }
+  }
+
+  Future<void> _getAIResponse() async {
+    if (_isTriageComplete) {
+      debugPrint('Triage already complete. Skipping AI response.');
+      _updateState(SpeechServiceState.idle);
+      return;
+    }
+    _updateState(SpeechServiceState.processing);
+    await _getStreamingAIResponse();
+  }
+
+  Future<void> _getStreamingAIResponse() async {
+    if (_openAiApiKey.isEmpty || _openAiApiKey == 'replace_with_your_key') {
+      debugPrint(
+          "OpenAI API Key is missing or invalid in _getStreamingAIResponse.");
+      _messagesController
+          .add(Message(content: "OpenAI API Key missing.", isUser: false));
+      _updateState(SpeechServiceState.idle);
+      return;
+    }
+
+    final List<OpenAIChatCompletionChoiceMessageModel> formattedMessages = [];
+    formattedMessages.add(OpenAIChatCompletionChoiceMessageModel(
+        role: OpenAIChatMessageRole.system,
+        content: [
+          OpenAIChatCompletionChoiceMessageContentItemModel.text(_systemPrompt)
+        ]));
+    formattedMessages.addAll(_messages
+        .where((msg) => !msg.isPartial && msg.content.isNotEmpty)
+        .map((msg) => OpenAIChatCompletionChoiceMessageModel(
+                role: msg.isUser
+                    ? OpenAIChatMessageRole.user
+                    : OpenAIChatMessageRole.assistant,
+                content: [
+                  OpenAIChatCompletionChoiceMessageContentItemModel.text(
+                      msg.content)
+                ]))
+        .toList());
+
+    final pendingMessage = Message(content: "", isUser: false, isPartial: true);
+    if (!_messages.any((m) => m.isPartial && !m.isUser)) {
+      _messages.add(pendingMessage);
+    }
+    _messagesController.add(pendingMessage);
+
+    debugPrint('Starting streaming OpenAI request using dart_openai');
+    String fullContent = "";
+    StreamSubscription<OpenAIStreamChatCompletionModel>? streamSubscription;
+
+    try {
+      final stream = OpenAI.instance.chat.createStream(
+          model: "gpt-3.5-turbo", messages: formattedMessages, maxTokens: 150);
+      streamSubscription = stream.listen(
+        (event) {
+          final deltaContent = event.choices.first.delta.content?.first?.text;
+          if (deltaContent != null) {
+            fullContent += deltaContent;
+            final existingPending = _messages.firstWhere(
+                (m) => m.isPartial && !m.isUser,
+                orElse: () => pendingMessage);
+            existingPending.content = fullContent;
+            _messagesController.add(existingPending);
+          }
+        },
+        onError: (error) {
+          debugPrint("Error in OpenAI stream: $error");
+          final existingPending = _messages.firstWhere(
+              (m) => m.isPartial && !m.isUser,
+              orElse: () => pendingMessage);
+          if (_messages.contains(existingPending)) {
+            _messages.remove(existingPending);
+          }
+          _messagesController.add(Message(
+              content: "Error receiving AI response: $error", isUser: false));
+          _updateState(SpeechServiceState.idle);
+          streamSubscription?.cancel();
+        },
+        onDone: () async {
+          debugPrint('OpenAI stream completed via dart_openai');
+          final existingPending = _messages.firstWhere(
+              (m) => m.isPartial && !m.isUser,
+              orElse: () => pendingMessage);
+          if (_messages.contains(existingPending)) {
+            existingPending.isPartial = false;
+            _messagesController.add(existingPending);
+          }
+          if (_useVoiceOutput == true && fullContent.isNotEmpty) {
+            if (fullContent.contains("[TRIAGE_COMPLETE]")) {
+              _isTriageComplete = true;
+              debugPrint('TRIAGE_COMPLETE token detected in AI response.');
+            }
+            await _speak(fullContent);
+          } else {
+            if (fullContent.contains("[TRIAGE_COMPLETE]")) {
+              _isTriageComplete = true;
+              debugPrint(
+                  'TRIAGE_COMPLETE token detected in AI response (text mode).');
+            }
+            _updateState(SpeechServiceState.idle);
+          }
+          streamSubscription?.cancel();
+        },
+        cancelOnError: true,
+      );
+    } catch (e) {
+      debugPrint('Error creating OpenAI stream request: $e');
+      final existingPending = _messages.firstWhere(
+          (m) => m.isPartial && !m.isUser,
+          orElse: () => pendingMessage);
+      if (_messages.contains(existingPending)) {
+        _messages.remove(existingPending);
+      }
+      _messagesController.add(
+          Message(content: 'Error communicating with AI: $e', isUser: false));
+      _updateState(SpeechServiceState.idle);
+      await streamSubscription?.cancel();
+    }
   }
 }

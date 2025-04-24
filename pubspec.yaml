@@ -17,6 +17,9 @@ dependencies:
   flutter_tts: ^4.2.2
   just_audio: ^0.9.46
   path_provider: ^2.1.5
+  dart_openai: ^5.1.0
+  uuid: ^4.4.0
+  audio_session: ^0.1.25
   # Foundation is part of flutter sdk, no explicit dependency needed usually
 
 dev_dependencies:

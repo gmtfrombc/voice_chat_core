@@ -4,6 +4,7 @@ import 'package:http/http.dart' as http;
 import 'package:just_audio/just_audio.dart';
 import 'package:path_provider/path_provider.dart';
 import 'dart:io';
+import 'dart:async';
 // import '../config.dart'; // Config dependency removed for now
 
 /// Service to handle text-to-speech using ElevenLabs API
@@ -14,6 +15,13 @@ class ElevenLabsService {
 
   // Audio player for ElevenLabs audio
   final AudioPlayer _audioPlayer = AudioPlayer();
+
+  // Expose the player state stream
+  Stream<PlayerState> get playerProcessingStateStream =>
+      _audioPlayer.playerStateStream;
+
+  // *** NEW: Expose playing stream ***
+  Stream<bool> get playingStream => _audioPlayer.playingStream;
 
   // Track if audio is currently playing
   bool _isPlaying = false;
@@ -50,25 +58,12 @@ class ElevenLabsService {
 
   /// Initialize the service
   Future<void> initialize() async {
-    // Set up completion handlers
-    _audioPlayer.playerStateStream.listen((state) {
-      if (state.processingState == ProcessingState.completed) {
-        _isPlaying = false;
-      }
-    });
-
-    // Initialize audio player without preloading
-    try {
-      // Try initializing with an empty source or a silent source if available
-      // Using 'about:blank' might cause issues on some platforms
-      await _audioPlayer.setAudioSource(
-        AudioSource.uri(Uri.parse('')),
-      ); // Use empty URI
-    } catch (e) {
-      debugPrint(
-        'Error initializing audio player (can be ignored if playback works): $e',
-      );
-    }
+    // Set up completion handlers -- Removed redundant listener
+    // _audioPlayer.playerStateStream.listen((state) {
+    //   if (state.processingState == ProcessingState.completed) {
+    //     _isPlaying = false;
+    //   }
+    // });
   }
 
   /// Synthesize speech using ElevenLabs API and play the result
@@ -83,6 +78,7 @@ class ElevenLabsService {
 
       // Check if API key is available (already injected)
       if (_apiKey.isEmpty) {
+        _isPlaying = false;
         throw Exception(
           'ElevenLabs API key is missing. Ensure it is provided during service initialization.',
         );
@@ -113,10 +109,12 @@ class ElevenLabsService {
 
         debugPrint('ElevenLabs: Saved audio to ${file.path}');
 
-        // Play the audio
+        // Play the audio and wait for it to complete
         await _audioPlayer.setFilePath(file.path);
+        await Future.delayed(const Duration(milliseconds: 100));
         await _audioPlayer.play();
-        debugPrint('ElevenLabs: Started playing audio');
+        _isPlaying = false;
+        debugPrint('ElevenLabs: Finished playing audio');
       } else {
         // Handle error
         debugPrint('ElevenLabs API Error: ${response.statusCode}');
@@ -129,7 +127,7 @@ class ElevenLabsService {
     } catch (e) {
       debugPrint('ElevenLabs synthesis error: $e');
       _isPlaying = false;
-      rethrow; // Rethrow to let calling code handle the error
+      rethrow;
     }
   }
 
