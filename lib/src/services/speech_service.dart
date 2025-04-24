@@ -332,14 +332,21 @@ class SpeechService {
     _elevenLabsService.dispose();
   }
 
-  /// Reset service to a clean state for a brand-new conversation session
-  void resetForNewSession() {
+  /// Reset the conversation so a new chat can start fresh.
+  /// Clears message history, resets triage flag and voice-output mode,
+  /// and returns the service to the idle state.
+  Future<void> resetConversation() async {
+    // Stop any ongoing activity
+    try {
+      await stopListening();
+      await stopSpeaking();
+    } catch (_) {}
+
+    _messages.clear();
     _isTriageComplete = false;
     _useVoiceOutput = null;
-    _messages.clear();
-    _isListening = false;
     _updateState(SpeechServiceState.idle);
-    debugPrint('SpeechService reset for new session');
+    debugPrint('SpeechService conversation reset.');
   }
 
   // Private method to start the actual speech recognition
